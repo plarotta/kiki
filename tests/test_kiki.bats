@@ -185,6 +185,30 @@ bootstrap_home() {
 # init — end-to-end scaffolding (regression test for the v0.1.2 silent-abort)
 # ──────────────────────────────────────────────────────────────────────────────
 
+@test "watch status reports loaded under set -o pipefail (SIGPIPE regression)" {
+  # Reproduces the pre-0.1.4 bug: `launchctl list | grep -q LABEL` returned
+  # 141 under pipefail because grep -q's early exit SIGPIPE'd launchctl,
+  # falsely reporting "not loaded" even when the agent was present.
+  local stub="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$stub"
+  cat > "$stub/launchctl" <<'SH'
+#!/usr/bin/env bash
+# Stub: print a launchctl-list-shaped table that contains the kiki watcher,
+# padded with extra lines so the SIGPIPE race window is wider.
+if [[ "$1" == "list" ]]; then
+  printf 'PID\tStatus\tLabel\n'
+  for i in $(seq 1 200); do printf -- '-\t0\tcom.apple.fake.%d\n' "$i"; done
+  printf -- '-\t127\tcom.kiki.watcher\n'
+  for i in $(seq 1 200); do printf -- '-\t0\tcom.apple.more.%d\n' "$i"; done
+fi
+SH
+  chmod +x "$stub/launchctl"
+  PATH="$stub:$PATH" run "$KIKI" watch status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"com.kiki.watcher: loaded"* ]]
+  [[ "$output" != *"not loaded"* ]]
+}
+
 @test "init scaffolds and runs to completion (qmd present)" {
   command -v qmd >/dev/null 2>&1 || skip "qmd not installed"
   rm -rf "$KIKI_HOME"

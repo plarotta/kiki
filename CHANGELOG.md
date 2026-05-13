@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-13
+
+### Fixed
+- **`kiki watch status` falsely reported "not loaded" even when the
+  agent was loaded.** Root cause: under `set -o pipefail`,
+  `launchctl list | grep -q LABEL` returns 141 — `grep -q` exits at
+  first match, SIGPIPE'ing `launchctl`, and pipefail propagates that
+  to the pipeline. The `if` block then took the else branch.
+  `kiki doctor` worked only because it wrapped its check in
+  `sh -c "..."` (a subshell without `pipefail` inherited), so the two
+  commands genuinely reported different states for the same agent.
+  Replaced the pipeline with pure-bash substring matching in two new
+  helpers, `launchd_agent_loaded()` and `qmd_collection_exists()`,
+  used everywhere the old pattern lived (watch status, uninstall,
+  doctor).
+
+### Added
+- bats test `watch status reports loaded under set -o pipefail
+  (SIGPIPE regression)` — stubs `launchctl` on PATH with a long
+  output that widens the SIGPIPE race window.
+
 ## [0.1.3] — 2026-05-13
 
 ### Fixed

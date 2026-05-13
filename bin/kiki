@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -67,6 +67,23 @@ mute() {
   fi
 }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+# Membership checks that avoid `... | grep -q PATTERN`. Under `set -o pipefail`
+# grep -q's early exit sends SIGPIPE upstream, leaving the pipeline at exit 141
+# — which an `if` block then treats as "no match" even though there was one.
+# We capture once into a variable and substring-match in pure bash instead.
+launchd_agent_loaded() {
+  local out=""
+  out="$(launchctl list 2>/dev/null)" || true
+  [[ "$out" == *"$WATCH_LABEL"* ]]
+}
+qmd_collection_exists() {
+  local name="$1" out=""
+  out="$(qmd status 2>/dev/null)" || true
+  # qmd prints "  <name> (" indented two spaces per entry; embedding \n in the
+  # pattern keeps us as strict as the original ^  name ( regex.
+  [[ "$out" == *$'\n  '"$name"' ('* ]]
+}
 
 require_home() {
   if [[ -d "$KIKI_HOME" && -f "$KIKI_HOME/CLAUDE.md" ]]; then
@@ -238,7 +255,7 @@ cmd_uninstall() {
 
   info "kiki uninstall"
   debug "watch plist: $WATCH_PLIST"
-  if [[ -f "$WATCH_PLIST" ]] || launchctl list 2>/dev/null | grep -q "$WATCH_LABEL"; then
+  if [[ -f "$WATCH_PLIST" ]] || launchd_agent_loaded; then
     cmd_watch uninstall || true
   else
     info "  watcher: not installed"
@@ -380,7 +397,7 @@ PLIST
       fi
       ;;
     status)
-      if launchctl list 2>/dev/null | grep -q "$WATCH_LABEL"; then
+      if launchd_agent_loaded; then
         info "$WATCH_LABEL: loaded"
         launchctl list | awk -v l="$WATCH_LABEL" '$3==l {print "  pid="$1" last_exit="$2}'
       else
@@ -482,12 +499,10 @@ cmd_doctor() {
   check "raw/ present"       test -d "$KIKI_HOME/raw"
   info ""
   heading "qmd collection:"
-  check "wiki collection registered" \
-    sh -c "qmd status 2>/dev/null | grep -q '^  wiki ('"
+  check "wiki collection registered" qmd_collection_exists wiki
   info ""
   heading "launchd watcher:"
-  check "agent loaded" \
-    sh -c "launchctl list 2>/dev/null | grep -q '$WATCH_LABEL'"
+  check "agent loaded" launchd_agent_loaded
   info ""
   heading "claude integration:"
   check "skill installed" test -f "$CLAUDE_SKILL_DIR/SKILL.md"
