@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-13
+
+### Fixed
+- **`kiki init` aborted silently right after "registering qmd collection
+  'wiki'".** Regression in 0.1.2: a `local current_path` declaration
+  followed by a separate pipeline assignment interacted with
+  `set -euo pipefail`. When `qmd collection show wiki` exited non-zero
+  (the normal case on first run — no collection yet), the pipeline's
+  non-zero exit propagated to the assignment, which `set -e` treated as
+  a fatal error. No watcher, no skill, no embed prompt. Added `|| true`
+  to the assignment.
+
+### Added
+- bats test `init scaffolds and runs to completion (qmd present)` —
+  end-to-end smoke test that exercises `kiki init` against a fresh
+  `$KIKI_HOME` so this regression can't ship silently again.
+
 ## [0.1.2] — 2026-05-13
 
 ### Fixed

@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.2"
+VERSION="0.1.3"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -187,8 +187,11 @@ cmd_init() {
     # ignores positional args after the first (so passing a separate name
     # silently uses CWD/<name>). We pass the absolute path; basename is 'wiki'.
     local expected_path="$KIKI_HOME/wiki"
-    local current_path
-    current_path="$(qmd collection show wiki 2>/dev/null | awk '/^  Path:/ {print $2; exit}')"
+    # `qmd collection show <missing>` exits non-zero. With set -e + pipefail,
+    # a bare `current_path="$(qmd … | awk …)"` would abort init silently when
+    # no wiki collection exists yet. Tolerate failure → empty path.
+    local current_path=""
+    current_path="$(qmd collection show wiki 2>/dev/null | awk '/^  Path:/ {print $2; exit}')" || true
     if [[ -z "$current_path" ]]; then
       mute qmd collection add "$expected_path" \
         || info "  (qmd collection add failed)"

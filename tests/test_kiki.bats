@@ -180,3 +180,34 @@ bootstrap_home() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAIL"* ]]
 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# init — end-to-end scaffolding (regression test for the v0.1.2 silent-abort)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@test "init scaffolds and runs to completion (qmd present)" {
+  command -v qmd >/dev/null 2>&1 || skip "qmd not installed"
+  rm -rf "$KIKI_HOME"
+
+  # Save/restore user's wiki collection so the test is hermetic w.r.t. qmd state.
+  local saved_path=""
+  saved_path="$(qmd collection show wiki 2>/dev/null | awk '/^  Path:/ {print $2; exit}')" || true
+  qmd collection remove wiki >/dev/null 2>&1 || true
+
+  # Decline embed, watcher, and claude-skill prompts (3 confirms).
+  run bash -c "printf 'n\nn\nn\n' | '$KIKI' init"
+  local rc=$status
+
+  # Restore qmd state before asserting (so a test failure doesn't leak state).
+  qmd collection remove wiki >/dev/null 2>&1 || true
+  if [[ -n "$saved_path" ]]; then
+    qmd collection add "$saved_path" >/dev/null 2>&1 || true
+  fi
+
+  [ "$rc" -eq 0 ]
+  [ -d "$KIKI_HOME/raw/notes" ]
+  [ -d "$KIKI_HOME/raw/transcripts" ]
+  [ -d "$KIKI_HOME/wiki" ]
+  [ -f "$KIKI_HOME/CLAUDE.md" ]
+  [[ "$output" == *"kiki initialized"* ]]
+}
