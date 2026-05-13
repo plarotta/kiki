@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-13
+
+### Fixed
+- **Watcher was broken on macOS.** `lib/watch-ingest.sh` used `flock(1)`,
+  which isn't shipped with macOS. Every WatchPaths fire exited via the
+  error path, so no captured notes were ever ingested. Replaced with a
+  portable `mkdir(2)`-based lock with stale-lock (>30min) reclamation.
+- **qmd 'wiki' collection registered against the wrong path.** `qmd
+  collection add wiki <path>` ignores the second positional arg and uses
+  `CWD/<name>`. We now call `qmd collection add <absolute-path>` (qmd
+  derives the name from the basename) and detect path drift on every
+  `kiki init`, re-registering against `$KIKI_HOME/wiki` if needed.
+
+### Added
+- `kiki uninstall [--purge]` — remove the launchd watcher, Claude skill,
+  MCP entries, and qmd `wiki` collection in one shot. `--purge` also
+  removes `$KIKI_HOME` (with confirmation). `brew uninstall` remains the
+  user's call.
+- `-v` / `--verbose` global flag (and `KIKI_VERBOSE=1`) — surfaces
+  output from qmd/claude calls that are normally swallowed; prints
+  debug lines for major steps.
+- Subcommands that need `$KIKI_HOME` now auto-offer to run `kiki init`
+  on interactive TTYs when the home is missing.
+- Light ANSI colors for `kiki doctor` (green ok, red FAIL, cyan
+  headings) and `kiki: ...` error prefixes. Respects `NO_COLOR`.
+
+### Changed
+- `-v` no longer aliases `version`; use `-V` / `--version` / `version`.
+
 ## [0.1.1] — 2026-05-13
 
 ### Changed

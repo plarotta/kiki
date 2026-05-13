@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.1.2"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -44,13 +44,44 @@ CLAUDE_CONFIG="$HOME/.claude.json"
 # ──────────────────────────────────────────────────────────────────────────────
 # logging + helpers
 # ──────────────────────────────────────────────────────────────────────────────
-die()  { printf 'kiki: %s\n' "$*" >&2; exit 1; }
+# ANSI colors when stdout is a TTY and NO_COLOR is unset (https://no-color.org).
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
+  C_RESET=$'\033[0m';  C_RED=$'\033[31m';   C_GREEN=$'\033[32m'
+  C_CYAN=$'\033[36m';  C_DIM=$'\033[2m'
+else
+  C_RESET=""; C_RED=""; C_GREEN=""; C_CYAN=""; C_DIM=""
+fi
+
+die()  { printf '%skiki:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
+heading() { printf '%s%s%s\n' "$C_CYAN" "$*" "$C_RESET"; }
+debug() { [[ "${KIKI_VERBOSE:-0}" == "1" ]] && printf '[debug] %s\n' "$*" >&2; return 0; }
+# Run a command; redirect output unless KIKI_VERBOSE=1. Use for noisy qmd/claude
+# calls whose output is normally swallowed.
+mute() {
+  if [[ "${KIKI_VERBOSE:-0}" == "1" ]]; then
+    debug "+ $*"
+    "$@"
+  else
+    "$@" >/dev/null 2>&1
+  fi
+}
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
 require_home() {
-  [[ -d "$KIKI_HOME" && -f "$KIKI_HOME/CLAUDE.md" ]] \
-    || die "\$KIKI_HOME ($KIKI_HOME) not initialized — run 'kiki init'"
+  if [[ -d "$KIKI_HOME" && -f "$KIKI_HOME/CLAUDE.md" ]]; then
+    return 0
+  fi
+  # Missing home. On an interactive TTY (and unless KIKI_YES forced batch mode),
+  # offer to run init right here so users don't have to context-switch.
+  if [[ -t 0 && -t 1 && "${KIKI_YES:-0}" != "1" ]]; then
+    info "kiki: \$KIKI_HOME ($KIKI_HOME) is not initialized."
+    if confirm "run 'kiki init' now?"; then
+      cmd_init
+      [[ -d "$KIKI_HOME" && -f "$KIKI_HOME/CLAUDE.md" ]] && return 0
+    fi
+  fi
+  die "\$KIKI_HOME ($KIKI_HOME) not initialized — run 'kiki init'"
 }
 
 confirm() {
@@ -73,10 +104,11 @@ print_usage() {
   cat <<EOF
 kiki ${VERSION} — persistent memory wiki for LLM coding assistants
 
-usage: kiki <command> [options]
+usage: kiki [-v|--verbose] <command> [options]
 
 commands:
   init [--yes]              scaffold \$KIKI_HOME; offer to install watcher + Claude skill
+  uninstall [--purge]       remove watcher, skill, MCP entries; --purge also rm's \$KIKI_HOME
   capture --type ...        write a note/transcript into raw/ (body via stdin)
   ingest <file>             manual one-shot ingest via 'claude -p'
   lint                      manual one-shot lint via 'claude -p'
@@ -88,10 +120,15 @@ commands:
   version                   print version
   help                      show this message
 
+global flags:
+  -v, --verbose             surface output from qmd/claude calls; print debug steps
+  -V, --version             print version and exit
+
 environment:
   KIKI_HOME                 wiki location (default: ~/.kiki)
   KIKI_PREFIX               where lib/ and templates/ live (auto-detected)
   KIKI_YES=1                non-interactive: assume "yes" on confirm prompts
+  KIKI_VERBOSE=1            same as --verbose
 
 learn more: https://github.com/plarotta/kiki
 EOF
@@ -146,8 +183,22 @@ cmd_init() {
   if command -v qmd >/dev/null 2>&1; then
     info ""
     info "registering qmd collection 'wiki'"
-    qmd collection add wiki "$KIKI_HOME/wiki" >/dev/null 2>&1 || info "  (already registered)"
-    qmd context add wiki "Personal kiki memory wiki at $KIKI_HOME. Stores persona, preferences, style, feedback, projects, entities, concepts about a single user. Pages link via Obsidian [[wikilinks]]." >/dev/null 2>&1 || true
+    # qmd's `collection add` derives the name from the path's basename and
+    # ignores positional args after the first (so passing a separate name
+    # silently uses CWD/<name>). We pass the absolute path; basename is 'wiki'.
+    local expected_path="$KIKI_HOME/wiki"
+    local current_path
+    current_path="$(qmd collection show wiki 2>/dev/null | awk '/^  Path:/ {print $2; exit}')"
+    if [[ -z "$current_path" ]]; then
+      mute qmd collection add "$expected_path" \
+        || info "  (qmd collection add failed)"
+    elif [[ "$current_path" != "$expected_path" ]]; then
+      info "  wiki collection points at $current_path — re-registering against $expected_path"
+      mute qmd collection remove wiki || true
+      mute qmd collection add "$expected_path" \
+        || info "  (qmd collection add failed)"
+    fi
+    mute qmd context add wiki "Personal kiki memory wiki at $KIKI_HOME. Stores persona, preferences, style, feedback, projects, entities, concepts about a single user. Pages link via Obsidian [[wikilinks]]." || true
     if confirm "build vector embeddings now? (downloads ~330MB model on first run)"; then
       info "embedding wiki (first run downloads ~330MB model — this may take a few minutes)…"
       qmd embed
@@ -166,6 +217,60 @@ cmd_init() {
   info ""
   info "kiki initialized. Try:"
   info "  echo 'hello' | kiki capture --type note --topic 'smoke test' --signal 'verify'"
+}
+
+cmd_uninstall() {
+  local purge=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purge) purge=1; shift ;;
+      -h|--help)
+        info "usage: kiki uninstall [--purge]"
+        info "  remove launchd watcher, Claude skill, MCP entries, and qmd 'wiki' collection."
+        info "  --purge also removes \$KIKI_HOME ($KIKI_HOME). brew uninstall is left to you."
+        return 0 ;;
+      *) die "uninstall: unknown arg: $1" ;;
+    esac
+  done
+
+  info "kiki uninstall"
+  debug "watch plist: $WATCH_PLIST"
+  if [[ -f "$WATCH_PLIST" ]] || launchctl list 2>/dev/null | grep -q "$WATCH_LABEL"; then
+    cmd_watch uninstall || true
+  else
+    info "  watcher: not installed"
+  fi
+
+  debug "claude skill: $CLAUDE_SKILL_DIR"
+  if [[ -d "$CLAUDE_SKILL_DIR" ]] || grep -q '"kiki"' "$CLAUDE_CONFIG" 2>/dev/null; then
+    cmd_claude uninstall || true
+  else
+    info "  claude skill + MCP: not installed"
+  fi
+
+  if command -v qmd >/dev/null 2>&1 && qmd collection show wiki >/dev/null 2>&1; then
+    info "  removing qmd 'wiki' collection"
+    mute qmd collection remove wiki || true
+  else
+    info "  qmd wiki collection: not registered"
+  fi
+
+  if [[ "$purge" == "1" ]]; then
+    if [[ -d "$KIKI_HOME" ]]; then
+      if confirm "really delete $KIKI_HOME (all your wiki data)?" n; then
+        rm -rf "$KIKI_HOME"
+        info "  removed $KIKI_HOME"
+      else
+        info "  kept $KIKI_HOME"
+      fi
+    else
+      info "  \$KIKI_HOME ($KIKI_HOME): does not exist"
+    fi
+  else
+    info ""
+    info "your wiki data at $KIKI_HOME is untouched. pass --purge to remove it."
+    info "to remove the kiki binary itself: brew uninstall kiki"
+  fi
 }
 
 cmd_capture() {
@@ -351,45 +456,45 @@ cmd_doctor() {
   check() {
     local label="$1"; shift
     if "$@" >/dev/null 2>&1; then
-      printf '  ok   %s\n' "$label"
+      printf '  %sok  %s %s\n' "$C_GREEN" "$C_RESET" "$label"
     else
-      printf '  FAIL %s\n' "$label"
+      printf '  %sFAIL%s %s\n' "$C_RED" "$C_RESET" "$label"
       fail=1
     fi
   }
   info "kiki $VERSION"
-  info "prefix: $PREFIX"
-  info "home:   $KIKI_HOME"
+  printf 'prefix: %s%s%s\n' "$C_DIM" "$PREFIX" "$C_RESET"
+  printf 'home:   %s%s%s\n' "$C_DIM" "$KIKI_HOME" "$C_RESET"
   info ""
-  info "dependencies:"
+  heading "dependencies:"
   check "claude on PATH"  command -v claude
   check "qmd on PATH"     command -v qmd
   check "node on PATH"    command -v node
   check "python3 on PATH" command -v python3
   info ""
-  info "kiki home:"
+  heading "kiki home:"
   check "\$KIKI_HOME exists" test -d "$KIKI_HOME"
   check "CLAUDE.md present"  test -f "$KIKI_HOME/CLAUDE.md"
   check "wiki/ present"      test -d "$KIKI_HOME/wiki"
   check "raw/ present"       test -d "$KIKI_HOME/raw"
   info ""
-  info "qmd collection:"
+  heading "qmd collection:"
   check "wiki collection registered" \
     sh -c "qmd status 2>/dev/null | grep -q '^  wiki ('"
   info ""
-  info "launchd watcher:"
+  heading "launchd watcher:"
   check "agent loaded" \
     sh -c "launchctl list 2>/dev/null | grep -q '$WATCH_LABEL'"
   info ""
-  info "claude integration:"
+  heading "claude integration:"
   check "skill installed" test -f "$CLAUDE_SKILL_DIR/SKILL.md"
   check "MCP 'kiki' registered" \
     python3 -c "import json,sys,pathlib; p=pathlib.Path('$CLAUDE_CONFIG'); sys.exit(0 if p.exists() and 'kiki' in (json.loads(p.read_text() or '{}').get('mcpServers') or {}) else 1)"
   info ""
   if [[ $fail -eq 0 ]]; then
-    info "all green."
+    printf '%sall green.%s\n' "$C_GREEN" "$C_RESET"
   else
-    info "some checks failed."
+    printf '%ssome checks failed.%s\n' "$C_RED" "$C_RESET"
     exit 1
   fi
 }
@@ -397,19 +502,32 @@ cmd_doctor() {
 # ──────────────────────────────────────────────────────────────────────────────
 # dispatch
 # ──────────────────────────────────────────────────────────────────────────────
+# Pre-parse top-level global flags. Subcommand-specific flags (e.g.
+# `capture --type ...`) are left in $@ for the subcommand to handle.
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -v|--verbose) export KIKI_VERBOSE=1; shift ;;
+    -V|--version) cmd_version; exit 0 ;;
+    -h|--help)    cmd_help;    exit 0 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
 sub="${1:-help}"
 shift || true
 case "$sub" in
-  init)                 cmd_init "$@" ;;
-  capture)              cmd_capture "$@" ;;
-  ingest)               cmd_ingest "$@" ;;
-  lint)                 cmd_lint ;;
-  query)                cmd_query "$@" ;;
-  watch)                cmd_watch "$@" ;;
-  claude)               cmd_claude "$@" ;;
-  doctor)               cmd_doctor ;;
-  where)                cmd_where ;;
-  version|-v|--version) cmd_version ;;
-  help|-h|--help)       cmd_help ;;
+  init)             cmd_init "$@" ;;
+  uninstall)        cmd_uninstall "$@" ;;
+  capture)          cmd_capture "$@" ;;
+  ingest)           cmd_ingest "$@" ;;
+  lint)             cmd_lint ;;
+  query)            cmd_query "$@" ;;
+  watch)            cmd_watch "$@" ;;
+  claude)           cmd_claude "$@" ;;
+  doctor)           cmd_doctor ;;
+  where)            cmd_where ;;
+  version|--version) cmd_version ;;
+  help)             cmd_help ;;
   *) die "unknown subcommand: '$sub' (try 'kiki help')" ;;
 esac

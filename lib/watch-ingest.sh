@@ -12,7 +12,7 @@ KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 STATE_DIR="$KIKI_HOME/.state"
 MANIFEST="$STATE_DIR/processed.txt"
 LOGFILE="$STATE_DIR/watcher.log"
-LOCKFILE="$STATE_DIR/watcher.lock"
+LOCKDIR="$STATE_DIR/watcher.lock.d"
 
 # launchd doesn't load .zshrc — give claude/qmd a sane PATH.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -25,12 +25,18 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGFILE"
 }
 
-# Single-flight lock (drops noisy back-to-back invocations from launchd).
-exec 9>"$LOCKFILE"
-if ! flock -n 9; then
+# Single-flight lock. mkdir(2) is atomic on POSIX, so we use a directory as a
+# portable mutex (macOS doesn't ship flock(1)). A run older than 30 minutes is
+# assumed stale (prior hard crash) and reclaimed.
+if [[ -d "$LOCKDIR" ]] && find "$LOCKDIR" -maxdepth 0 -mmin +30 2>/dev/null | grep -q .; then
+  log "reclaiming stale lock (>30min old)"
+  rmdir "$LOCKDIR" 2>/dev/null || true
+fi
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
   log "another watcher run is in progress; exiting"
   exit 0
 fi
+trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 sleep 3  # debounce: let files finish landing
 
