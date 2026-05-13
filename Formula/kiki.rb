@@ -2,7 +2,7 @@ class Kiki < Formula
   desc "Persistent memory wiki for LLM coding assistants"
   homepage "https://github.com/plarotta/kiki"
   url "https://github.com/plarotta/kiki/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "6cd778f1bbb3f3b8b32bce1620a16f2a51703f6f3fb883f89f7eb7225caf267d"
   license "MIT"
   head "https://github.com/plarotta/kiki.git", branch: "main"
 
