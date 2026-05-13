@@ -167,6 +167,9 @@ trap 'rm -f "$TMP"' EXIT
   fi
   echo "## Content"
   echo
+  if [[ -t 0 ]]; then
+    echo "capture: reading body from stdin — type your note, then Ctrl+D to finish (Ctrl+C to abort)" >&2
+  fi
   cat
   echo
 } > "$TMP"

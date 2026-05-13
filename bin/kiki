@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -149,7 +149,9 @@ cmd_init() {
     qmd collection add wiki "$KIKI_HOME/wiki" >/dev/null 2>&1 || info "  (already registered)"
     qmd context add wiki "Personal kiki memory wiki at $KIKI_HOME. Stores persona, preferences, style, feedback, projects, entities, concepts about a single user. Pages link via Obsidian [[wikilinks]]." >/dev/null 2>&1 || true
     if confirm "build vector embeddings now? (downloads ~330MB model on first run)"; then
+      info "embedding wiki (first run downloads ~330MB model — this may take a few minutes)…"
       qmd embed
+      info "✓ embeddings ready"
     fi
   fi
 

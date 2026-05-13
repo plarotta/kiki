@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-13
+
+### Changed
+- `kiki capture`: when stdin is a TTY, print a hint to stderr explaining that
+  the body is being read from stdin (Ctrl+D to finish). Previously the command
+  appeared to hang silently.
+- `kiki init`: bracket the `qmd embed` call with progress messages so users
+  know the ~330MB embedding-model download is in progress on first run.
+
 ## [0.1.0] — 2026-05-12
 
 Initial release.
