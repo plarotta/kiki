@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck bin/kiki lib/*.sh
+
+  python:
+    name: python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: byte-compile
+        run: python3 -m py_compile mcp/kiki-mcp.py
+      - name: ruff (lint, non-blocking on style nits)
+        run: |
+          pip install --quiet ruff
+          ruff check mcp/kiki-mcp.py --select=E,F,W,B --ignore=E501
+
+  bats:
+    name: bats
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bats
+        run: brew install bats-core
+      - name: bats
+        run: bats tests/
+
+  brew:
+    name: brew style + audit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: brew style
+        run: brew style Formula/kiki.rb
+      - name: brew audit (offline; --new + --online require a published tarball)
+        run: |
+          tap_dir="$(brew --repository)/Library/Taps/plarotta/homebrew-tap"
+          mkdir -p "$tap_dir/Formula"
+          cp Formula/kiki.rb "$tap_dir/Formula/"
+          brew audit --formula --strict plarotta/tap/kiki

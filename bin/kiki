@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# kiki — persistent memory wiki for LLM coding assistants.
+# https://github.com/plarotta/kiki
+
+set -euo pipefail
+
+VERSION="0.1.0"
+KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# resolve $PREFIX (where lib/ and templates/ live)
+# ──────────────────────────────────────────────────────────────────────────────
+resolve_prefix() {
+  if [[ -n "${KIKI_PREFIX:-}" ]]; then
+    printf '%s' "$KIKI_PREFIX"
+    return
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "$script_dir/../lib/capture.sh" ]]; then
+    (cd "$script_dir/.." && pwd)
+    return
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    local bp
+    bp="$(brew --prefix 2>/dev/null || true)"
+    if [[ -d "$bp/share/kiki" ]]; then
+      printf '%s' "$bp/share/kiki"
+      return
+    fi
+  fi
+  echo "kiki: cannot locate lib/ and templates/ (try setting KIKI_PREFIX)" >&2
+  exit 1
+}
+PREFIX="$(resolve_prefix)"
+LIB_DIR="$PREFIX/lib"
+TPL_DIR="$PREFIX/templates"
+
+WATCH_LABEL="com.kiki.watcher"
+WATCH_PLIST="$HOME/Library/LaunchAgents/${WATCH_LABEL}.plist"
+CLAUDE_SKILL_DIR="$HOME/.claude/skills/kiki-capture"
+CLAUDE_CONFIG="$HOME/.claude.json"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# logging + helpers
+# ──────────────────────────────────────────────────────────────────────────────
+die()  { printf 'kiki: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+require_home() {
+  [[ -d "$KIKI_HOME" && -f "$KIKI_HOME/CLAUDE.md" ]] \
+    || die "\$KIKI_HOME ($KIKI_HOME) not initialized — run 'kiki init'"
+}
+
+confirm() {
+  local prompt="$1" default="${2:-y}" reply
+  if [[ "${KIKI_YES:-0}" == "1" ]]; then return 0; fi
+  if [[ "$default" == "y" ]]; then
+    read -r -p "$prompt [Y/n] " reply || true
+    reply="${reply:-y}"
+  else
+    read -r -p "$prompt [y/N] " reply || true
+    reply="${reply:-n}"
+  fi
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# usage
+# ──────────────────────────────────────────────────────────────────────────────
+print_usage() {
+  cat <<EOF
+kiki ${VERSION} — persistent memory wiki for LLM coding assistants
+
+usage: kiki <command> [options]
+
+commands:
+  init [--yes]              scaffold \$KIKI_HOME; offer to install watcher + Claude skill
+  capture --type ...        write a note/transcript into raw/ (body via stdin)
+  ingest <file>             manual one-shot ingest via 'claude -p'
+  lint                      manual one-shot lint via 'claude -p'
+  query "<question>"        qmd hybrid search over the wiki
+  watch <op>                install | uninstall | status | logs
+  claude <op>               install | uninstall (skill + MCP entries in ~/.claude.json)
+  doctor                    verify install, dependencies, watcher, skill
+  where                     print \$KIKI_HOME
+  version                   print version
+  help                      show this message
+
+environment:
+  KIKI_HOME                 wiki location (default: ~/.kiki)
+  KIKI_PREFIX               where lib/ and templates/ live (auto-detected)
+  KIKI_YES=1                non-interactive: assume "yes" on confirm prompts
+
+learn more: https://github.com/plarotta/kiki
+EOF
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# subcommands
+# ──────────────────────────────────────────────────────────────────────────────
+
+cmd_version() { printf 'kiki %s\n' "$VERSION"; }
+cmd_where()   { printf '%s\n' "$KIKI_HOME"; }
+cmd_help()    { print_usage; }
+
+cmd_init() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes|-y) export KIKI_YES=1; shift ;;
+      -h|--help)
+        info "usage: kiki init [--yes]"
+        info "  scaffolds \$KIKI_HOME (default ~/.kiki); offers to install watcher + Claude skill"
+        return 0 ;;
+      *) die "init: unknown arg: $1" ;;
+    esac
+  done
+
+  if [[ -f "$KIKI_HOME/CLAUDE.md" ]]; then
+    info "kiki home already exists at $KIKI_HOME — leaving it alone"
+  else
+    info "scaffolding $KIKI_HOME"
+    mkdir -p \
+      "$KIKI_HOME/raw/notes" \
+      "$KIKI_HOME/raw/transcripts" \
+      "$KIKI_HOME/raw/images" \
+      "$KIKI_HOME/wiki/entities" \
+      "$KIKI_HOME/wiki/concepts" \
+      "$KIKI_HOME/.state"
+    cp "$TPL_DIR/CLAUDE.md" "$KIKI_HOME/CLAUDE.md"
+    cp "$TPL_DIR/wiki/"*.md "$KIKI_HOME/wiki/"
+  fi
+
+  # qmd: optional, but the search story relies on it. Offer to install if missing.
+  if ! command -v qmd >/dev/null 2>&1; then
+    info ""
+    info "qmd (the wiki search engine) isn't installed."
+    if command -v npm >/dev/null 2>&1 && confirm "install qmd globally now? (npm install -g @tobilu/qmd)"; then
+      npm install -g @tobilu/qmd
+    else
+      info "  skipping; search will be unavailable until you install qmd."
+    fi
+  fi
+
+  if command -v qmd >/dev/null 2>&1; then
+    info ""
+    info "registering qmd collection 'wiki'"
+    qmd collection add wiki "$KIKI_HOME/wiki" >/dev/null 2>&1 || info "  (already registered)"
+    qmd context add wiki "Personal kiki memory wiki at $KIKI_HOME. Stores persona, preferences, style, feedback, projects, entities, concepts about a single user. Pages link via Obsidian [[wikilinks]]." >/dev/null 2>&1 || true
+    if confirm "build vector embeddings now? (downloads ~330MB model on first run)"; then
+      qmd embed
+    fi
+  fi
+
+  info ""
+  if confirm "install the launchd watcher (auto-ingest on raw/ changes)?"; then
+    cmd_watch install
+  fi
+  if confirm "install the Claude Code skill + MCP server?"; then
+    cmd_claude install
+  fi
+
+  info ""
+  info "kiki initialized. Try:"
+  info "  echo 'hello' | kiki capture --type note --topic 'smoke test' --signal 'verify'"
+}
+
+cmd_capture() {
+  require_home
+  exec env KIKI_HOME="$KIKI_HOME" bash "$LIB_DIR/capture.sh" "$@"
+}
+
+cmd_ingest() {
+  require_home
+  need claude
+  local target="${1:-}"
+  [[ -z "$target" || "$target" == "-h" || "$target" == "--help" ]] && {
+    info "usage: kiki ingest <file>"
+    info "  one-shot manual ingest of a file inside \$KIKI_HOME (normally the watcher does this)"
+    return 0
+  }
+  [[ -e "$target" ]] || die "ingest: no such file: $target"
+
+  local abs rel
+  abs="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+  case "$abs" in
+    "$KIKI_HOME"/*) rel="${abs#"$KIKI_HOME/"}" ;;
+    *) die "ingest: file is not inside \$KIKI_HOME ($KIKI_HOME): $abs" ;;
+  esac
+
+  cd "$KIKI_HOME"
+  local prompt
+  prompt="Ingest the file \`$rel\` following the ingest workflow in CLAUDE.md. \
+Steps: read CLAUDE.md first, read \`$rel\` end-to-end, update relevant wiki pages \
+(prefer updating to creating), flag contradictions, update wiki/index.md, append a \
+log entry '## [YYYY-MM-DD] ingest | <title>', run 'qmd update', then flip \
+'ingested: true' in the source frontmatter. Be terse."
+  claude -p "$prompt" --dangerously-skip-permissions
+}
+
+cmd_lint() {
+  require_home
+  need claude
+  cd "$KIKI_HOME"
+  local prompt
+  prompt="Run the lint workflow defined in CLAUDE.md against the wiki. \
+Look for contradictions, stale claims, orphan pages, dangling [[wikilinks]], concept \
+inflation, index drift. Fix safe issues yourself. For judgment calls, report and skip. \
+Append a log entry '## [YYYY-MM-DD] lint | <summary>'. Be terse."
+  claude -p "$prompt" --dangerously-skip-permissions
+}
+
+cmd_query() {
+  need qmd
+  local q="${1:-}"
+  [[ -z "$q" || "$q" == "-h" || "$q" == "--help" ]] && {
+    info "usage: kiki query \"<question>\""
+    info "  hybrid BM25+vector+LLM-rerank search over the wiki"
+    return 0
+  }
+  qmd query wiki "$q"
+}
+
+cmd_watch() {
+  case "${1:-}" in
+    install)
+      require_home
+      mkdir -p "$HOME/Library/LaunchAgents" "$KIKI_HOME/.state"
+      cat > "$WATCH_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${WATCH_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${LIB_DIR}/watch-ingest.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KIKI_HOME</key><string>${KIKI_HOME}</string>
+  </dict>
+  <key>WatchPaths</key>
+  <array>
+    <string>${KIKI_HOME}/raw/notes</string>
+    <string>${KIKI_HOME}/raw/transcripts</string>
+  </array>
+  <key>WorkingDirectory</key><string>${KIKI_HOME}</string>
+  <key>StandardOutPath</key><string>${KIKI_HOME}/.state/watcher.log</string>
+  <key>StandardErrorPath</key><string>${KIKI_HOME}/.state/watcher.log</string>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>
+PLIST
+      launchctl unload "$WATCH_PLIST" 2>/dev/null || true
+      launchctl load "$WATCH_PLIST"
+      info "installed launchd agent: $WATCH_LABEL"
+      info "log: $KIKI_HOME/.state/watcher.log"
+      ;;
+    uninstall)
+      if [[ -f "$WATCH_PLIST" ]]; then
+        launchctl unload "$WATCH_PLIST" 2>/dev/null || true
+        rm -f "$WATCH_PLIST"
+        info "removed launchd agent: $WATCH_LABEL"
+      else
+        info "no agent installed at $WATCH_PLIST"
+      fi
+      ;;
+    status)
+      if launchctl list 2>/dev/null | grep -q "$WATCH_LABEL"; then
+        info "$WATCH_LABEL: loaded"
+        launchctl list | awk -v l="$WATCH_LABEL" '$3==l {print "  pid="$1" last_exit="$2}'
+      else
+        info "$WATCH_LABEL: not loaded"
+      fi
+      ;;
+    logs)
+      require_home
+      tail -f "$KIKI_HOME/.state/watcher.log"
+      ;;
+    ""|-h|--help)
+      info "usage: kiki watch (install|uninstall|status|logs)"
+      info "  manages the launchd LaunchAgent that auto-ingests on raw/ changes" ;;
+    *) die "watch: unknown op: $1 (try 'kiki watch --help')" ;;
+  esac
+}
+
+cmd_claude() {
+  case "${1:-}" in
+    install)
+      need python3
+      mkdir -p "$CLAUDE_SKILL_DIR"
+      cp "$TPL_DIR/skill/SKILL.md" "$CLAUDE_SKILL_DIR/SKILL.md"
+      info "installed skill: $CLAUDE_SKILL_DIR/SKILL.md"
+
+      local mcp_cmd
+      mcp_cmd="$(command -v kiki-mcp || echo "$PREFIX/mcp/kiki-mcp.py")"
+      KIKI_HOME="$KIKI_HOME" KIKI_MCP="$mcp_cmd" \
+        python3 - "$CLAUDE_CONFIG" <<'PY'
+import json, os, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        sys.exit(f"refusing to clobber malformed JSON at {path}")
+mcp = cfg.setdefault("mcpServers", {})
+mcp["kiki"] = {
+    "command": os.environ["KIKI_MCP"],
+    "env": {"KIKI_HOME": os.environ["KIKI_HOME"]},
+}
+mcp["qmd-kiki"] = {
+    "command": "qmd",
+    "args": ["mcp", "--collection", "wiki"],
+}
+path.write_text(json.dumps(cfg, indent=2) + "\n")
+print(f"registered MCP servers in {path}: kiki, qmd-kiki")
+PY
+      ;;
+    uninstall)
+      rm -rf "$CLAUDE_SKILL_DIR"
+      info "removed skill: $CLAUDE_SKILL_DIR"
+      if [[ -f "$CLAUDE_CONFIG" ]]; then
+        python3 - "$CLAUDE_CONFIG" <<'PY'
+import json, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+cfg = json.loads(path.read_text() or "{}")
+mcp = cfg.get("mcpServers", {})
+for k in ("kiki", "qmd-kiki"):
+    mcp.pop(k, None)
+path.write_text(json.dumps(cfg, indent=2) + "\n")
+print(f"removed MCP entries from {path}")
+PY
+      fi
+      ;;
+    ""|-h|--help)
+      info "usage: kiki claude (install|uninstall)"
+      info "  install: copies skill to ~/.claude/skills/kiki-capture/, adds MCP servers to ~/.claude.json" ;;
+    *) die "claude: unknown op: $1 (try 'kiki claude --help')" ;;
+  esac
+}
+
+cmd_doctor() {
+  local fail=0
+  check() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+      printf '  ok   %s\n' "$label"
+    else
+      printf '  FAIL %s\n' "$label"
+      fail=1
+    fi
+  }
+  info "kiki $VERSION"
+  info "prefix: $PREFIX"
+  info "home:   $KIKI_HOME"
+  info ""
+  info "dependencies:"
+  check "claude on PATH"  command -v claude
+  check "qmd on PATH"     command -v qmd
+  check "node on PATH"    command -v node
+  check "python3 on PATH" command -v python3
+  info ""
+  info "kiki home:"
+  check "\$KIKI_HOME exists" test -d "$KIKI_HOME"
+  check "CLAUDE.md present"  test -f "$KIKI_HOME/CLAUDE.md"
+  check "wiki/ present"      test -d "$KIKI_HOME/wiki"
+  check "raw/ present"       test -d "$KIKI_HOME/raw"
+  info ""
+  info "qmd collection:"
+  check "wiki collection registered" \
+    sh -c "qmd status 2>/dev/null | grep -q '^  wiki ('"
+  info ""
+  info "launchd watcher:"
+  check "agent loaded" \
+    sh -c "launchctl list 2>/dev/null | grep -q '$WATCH_LABEL'"
+  info ""
+  info "claude integration:"
+  check "skill installed" test -f "$CLAUDE_SKILL_DIR/SKILL.md"
+  check "MCP 'kiki' registered" \
+    python3 -c "import json,sys,pathlib; p=pathlib.Path('$CLAUDE_CONFIG'); sys.exit(0 if p.exists() and 'kiki' in (json.loads(p.read_text() or '{}').get('mcpServers') or {}) else 1)"
+  info ""
+  if [[ $fail -eq 0 ]]; then
+    info "all green."
+  else
+    info "some checks failed."
+    exit 1
+  fi
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# dispatch
+# ──────────────────────────────────────────────────────────────────────────────
+sub="${1:-help}"
+shift || true
+case "$sub" in
+  init)                 cmd_init "$@" ;;
+  capture)              cmd_capture "$@" ;;
+  ingest)               cmd_ingest "$@" ;;
+  lint)                 cmd_lint ;;
+  query)                cmd_query "$@" ;;
+  watch)                cmd_watch "$@" ;;
+  claude)               cmd_claude "$@" ;;
+  doctor)               cmd_doctor ;;
+  where)                cmd_where ;;
+  version|-v|--version) cmd_version ;;
+  help|-h|--help)       cmd_help ;;
+  *) die "unknown subcommand: '$sub' (try 'kiki help')" ;;
+esac

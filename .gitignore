@@ -1,0 +1,7 @@
+.DS_Store
+*.swp
+node_modules/
+__pycache__/
+
+# Claude Code per-session settings — not part of the package
+.claude/settings.local.json
