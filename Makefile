@@ -10,12 +10,13 @@ lint: ## Shellcheck bash + byte-compile python.
 test: ## Run bats smoke tests.
 	bats tests/
 
-audit: ## brew style + audit. Requires the formula staged in a local tap.
+audit: ## brew style + audit. Stages formula in a transient throwaway tap.
 	@brew style Formula/kiki.rb
-	@tap_dir="$$(brew --repository)/Library/Taps/plarotta/homebrew-tap"; \
-		mkdir -p "$$tap_dir/Formula"; \
-		cp Formula/kiki.rb "$$tap_dir/Formula/"; \
-		brew audit --formula --strict plarotta/tap/kiki
+	@ns_dir="$$(brew --repository)/Library/Taps/kiki-audit"; \
+		trap 'rm -rf "$$ns_dir"' EXIT; \
+		mkdir -p "$$ns_dir/homebrew-audit/Formula"; \
+		cp Formula/kiki.rb "$$ns_dir/homebrew-audit/Formula/"; \
+		brew audit --formula --strict kiki-audit/audit/kiki
 
 check: lint test audit ## All local checks.
 
