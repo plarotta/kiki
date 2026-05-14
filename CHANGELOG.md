@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-13
+
+### Added
+- `kiki ingest` and `kiki lint` now stream progress in real time
+  instead of printing a single final blob after a long silent wait.
+  As `claude -p` works through the ingest, you see each tool call
+  ("→ Read wiki/index.md", "→ Edit wiki/log.md", "→ Bash: qmd update")
+  and assistant text appears as it's generated, capped with a
+  duration/cost line. Driven by a small `lib/stream-claude.py` that
+  parses `--output-format stream-json --include-partial-messages`.
+- `KIKI_VERBOSE=1` (or `-v`) now also affects ingest/lint: tool
+  inputs are shown un-truncated (paths, full bash commands).
+
+### Fixed
+- `info "ingesting $rel…"` triggered `unbound variable: rel<garbled>`
+  under `set -u` because bash consumed the leading bytes of the `…`
+  multi-byte UTF-8 char as part of the variable name. Braces fix it.
+
 ## [0.1.4] — 2026-05-13
 
 ### Fixed

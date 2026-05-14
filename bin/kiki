@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.4"
+VERSION="0.1.5"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -83,6 +83,17 @@ qmd_collection_exists() {
   # qmd prints "  <name> (" indented two spaces per entry; embedding \n in the
   # pattern keeps us as strict as the original ^  name ( regex.
   [[ "$out" == *$'\n  '"$name"' ('* ]]
+}
+# Run claude -p and stream its events through lib/stream-claude.py so the
+# user sees tool_use markers + text deltas as they arrive instead of a
+# silent wait followed by a final dump. Honors KIKI_VERBOSE for tool detail.
+claude_run_streaming() {
+  local prompt="$1"
+  KIKI_VERBOSE="${KIKI_VERBOSE:-0}" claude -p "$prompt" \
+    --dangerously-skip-permissions \
+    --output-format stream-json --include-partial-messages --verbose \
+    | python3 -u "$LIB_DIR/stream-claude.py"
+  return "${PIPESTATUS[1]}"
 }
 
 require_home() {
@@ -317,25 +328,27 @@ cmd_ingest() {
   esac
 
   cd "$KIKI_HOME"
+  info "ingesting ${rel}…"
   local prompt
   prompt="Ingest the file \`$rel\` following the ingest workflow in CLAUDE.md. \
 Steps: read CLAUDE.md first, read \`$rel\` end-to-end, update relevant wiki pages \
 (prefer updating to creating), flag contradictions, update wiki/index.md, append a \
 log entry '## [YYYY-MM-DD] ingest | <title>', run 'qmd update', then flip \
 'ingested: true' in the source frontmatter. Be terse."
-  claude -p "$prompt" --dangerously-skip-permissions
+  claude_run_streaming "$prompt"
 }
 
 cmd_lint() {
   require_home
   need claude
   cd "$KIKI_HOME"
+  info "linting wiki…"
   local prompt
   prompt="Run the lint workflow defined in CLAUDE.md against the wiki. \
 Look for contradictions, stale claims, orphan pages, dangling [[wikilinks]], concept \
 inflation, index drift. Fix safe issues yourself. For judgment calls, report and skip. \
 Append a log entry '## [YYYY-MM-DD] lint | <summary>'. Be terse."
-  claude -p "$prompt" --dangerously-skip-permissions
+  claude_run_streaming "$prompt"
 }
 
 cmd_query() {

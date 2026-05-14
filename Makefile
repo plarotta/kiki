@@ -5,7 +5,7 @@ help: ## Show this help.
 
 lint: ## Shellcheck bash + byte-compile python.
 	shellcheck bin/kiki lib/*.sh
-	python3 -m py_compile mcp/kiki-mcp.py
+	python3 -m py_compile mcp/kiki-mcp.py lib/stream-claude.py
 
 test: ## Run bats smoke tests.
 	bats tests/
