@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.5"
+VERSION="0.2.0"
 KIKI_HOME="${KIKI_HOME:-$HOME/.kiki}"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -84,6 +84,14 @@ qmd_collection_exists() {
   # pattern keeps us as strict as the original ^  name ( regex.
   [[ "$out" == *$'\n  '"$name"' ('* ]]
 }
+# True if the user has selected a non-default ingest provider (env or config).
+# When false, we keep the original `claude -p` path for back-compat.
+provider_configured() {
+  [[ -n "${KIKI_PROVIDER:-}" ]] && return 0
+  [[ -f "$KIKI_HOME/config.toml" ]] || return 1
+  grep -Eq '^[[:space:]]*provider[[:space:]]*=' "$KIKI_HOME/config.toml" 2>/dev/null
+}
+
 # Run claude -p and stream its events through lib/stream-claude.py so the
 # user sees tool_use markers + text deltas as they arrive instead of a
 # silent wait followed by a final dump. Honors KIKI_VERBOSE for tool detail.
@@ -157,6 +165,8 @@ environment:
   KIKI_PREFIX               where lib/ and templates/ live (auto-detected)
   KIKI_YES=1                non-interactive: assume "yes" on confirm prompts
   KIKI_VERBOSE=1            same as --verbose
+  KIKI_PROVIDER             ingest backend: anthropic|openai|gemini|ollama (default: claude CLI)
+  KIKI_MODEL                model to use with the selected provider
 
 learn more: https://github.com/plarotta/kiki
 EOF
@@ -311,11 +321,14 @@ cmd_capture() {
 
 cmd_ingest() {
   require_home
-  need claude
   local target="${1:-}"
   [[ -z "$target" || "$target" == "-h" || "$target" == "--help" ]] && {
     info "usage: kiki ingest <file>"
-    info "  one-shot manual ingest of a file inside \$KIKI_HOME (normally the watcher does this)"
+    info "  one-shot manual ingest of a file inside \$KIKI_HOME"
+    info ""
+    info "  Default uses 'claude -p' (Claude Code agentic ingest)."
+    info "  Set KIKI_PROVIDER=anthropic|openai|gemini|ollama (or [ingest] in"
+    info "  \$KIKI_HOME/config.toml) to switch to a direct-API provider."
     return 0
   }
   [[ -e "$target" ]] || die "ingest: no such file: $target"
@@ -329,6 +342,12 @@ cmd_ingest() {
 
   cd "$KIKI_HOME"
   info "ingesting ${rel}…"
+
+  if provider_configured; then
+    exec python3 "$LIB_DIR/ingest.py" "$abs"
+  fi
+
+  need claude
   local prompt
   prompt="Ingest the file \`$rel\` following the ingest workflow in CLAUDE.md. \
 Steps: read CLAUDE.md first, read \`$rel\` end-to-end, update relevant wiki pages \

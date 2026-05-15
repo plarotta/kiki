@@ -6,6 +6,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-14
+
+### Added
+- **Multi-provider ingest backends.** `kiki ingest` can now route to
+  Anthropic's API, OpenAI, Google Gemini, or a local Ollama instance
+  in addition to the default `claude -p` Claude Code path. Selection
+  via `KIKI_PROVIDER=anthropic|openai|gemini|ollama` (env), or in
+  `$KIKI_HOME/config.toml`:
+
+      [ingest]
+      provider = "openai"
+      model = "gpt-5"
+
+  API keys come from the standard env vars (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`); Ollama uses `OLLAMA_BASE_URL`
+  (default `http://localhost:11434`). Env always overrides config.
+- `lib/providers.py` — stdlib-only HTTP adapters for each provider.
+  No new pip dependencies.
+- `lib/ingest.py` — single-shot orchestrator: collects current wiki
+  state + the raw note, asks the provider for a structured JSON edit
+  plan (constrained via tool/json-schema/responseSchema/format=json
+  per provider), applies the edits to wiki/, appends a log entry,
+  flips `ingested: true`, and runs `qmd update`.
+- New `KIKI_MODEL` env var to override the model per-provider.
+- `kiki ingest --help` documents the new env vars.
+
+### Notes
+- The default behavior is unchanged: with no `KIKI_PROVIDER` and no
+  `[ingest] provider` in config, `kiki ingest` still shells to
+  `claude -p` (the agentic path).
+- The non-claude providers use a single API call (no tool-use loop)
+  with the entire wiki sent in the prompt. For kiki's small
+  fixed-page schema this is fine; bigger wikis may exceed context.
+- Local Ollama models need to be capable enough to follow a JSON
+  schema reliably. Small models (e.g. gemma3:4b) tend to return
+  no-op plans. Use a 30B+ model for best results.
+- `kiki lint` and the launchd watcher still use the `claude -p`
+  path. Migrating those is the next step.
+
 ## [0.1.5] — 2026-05-13
 
 ### Added
